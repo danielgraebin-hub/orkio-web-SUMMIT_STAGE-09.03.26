@@ -485,6 +485,46 @@ const closeCapacityModal = () => {
     return "";
   }
 
+
+  function appendToPlaceholder(delta) {
+    if (!delta) return;
+
+    setMessages((prev) => {
+      const messages = Array.isArray(prev) ? [...prev] : [];
+
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+
+        if (
+          m?.role === "assistant" &&
+          String(m?.id || "").startsWith("tmp-ass-")
+        ) {
+          const oldContent =
+            m.content === "⌛ Preparando resposta..."
+              ? ""
+              : (m.content || "");
+
+          messages[i] = {
+            ...m,
+            content: oldContent + delta,
+          };
+
+          return messages;
+        }
+      }
+
+      messages.push({
+        id: `tmp-ass-${Date.now()}`,
+        role: "assistant",
+        content: delta,
+        agent_name: "Orkio",
+        created_at: Math.floor(Date.now() / 1000),
+      });
+
+      return messages;
+    });
+  }
+
   async function sendMessage(presetMsg = null, opts = {}) {
     const isRetry = !!opts?.isRetry;
     const msg = ((presetMsg ?? text) || "").trim();
