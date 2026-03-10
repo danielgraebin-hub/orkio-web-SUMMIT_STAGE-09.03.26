@@ -576,136 +576,26 @@ const closeCapacityModal = () => {
       setV2vPhase('chat');
       setV2vError(null);
 
-      // Prefer realtime SSE stream when available (fallback to non-stream)
+      // SAFE CHAT MODE: temporarily bypass SSE streaming and use JSON chat only.
+      // This avoids stream/parser/proxy issues and prioritizes reliable agent responses for Summit.
       let resp = null;
       let newThreadId = threadId;
 
-      // SERVER_BUSY retry control (exponential backoff + jitter)
-      const MAX_BUSY_RETRIES = 6;
-      let busyRetry = 0;
+      resp = await chat({
+        token,
+        org: tenant,
+        thread_id: threadId,
+        message: finalMsg,
+        agent_id: agentIdToSend,
+        trace_id: traceId,
+        client_message_id: clientMessageId,
+        signal: ctl.signal,
+      });
 
-      while (true) {
-        const sseRes = await chatStream({
-          token,
-          org: tenant,
-          thread_id: threadId,
-          message: finalMsg,
-          agent_id: agentIdToSend,
-          trace_id: traceId,
-          client_message_id: clientMessageId,
-          signal: ctl.signal,
-        });
-
-// PATCH0113: Capacity handling (STREAM_LIMIT)
-if (sseRes && sseRes.status === 429) {
-  closeCapacityModal();
-  openCapacityModal(msg);
-  break;
-}
-
-
-        if (sseRes && sseRes.ok && sseRes.body) {
-          const reader = sseRes.body.getReader();
-          const decoder = new TextDecoder();
-          let buf = "";
-          let activeAgent = null;
-          let sawServerBusy = false;
-
-          // Read SSE frames
-          outerRead: while (true) {
-            if (isStale()) { try { await reader.cancel(); } catch {} break; }
-            const { value, done } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-
-            // parse SSE frames split by double newline
-            while (true) {
-              const idx = buf.indexOf("\n\n");
-              if (idx < 0) break;
-              const raw = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
-
-              const parts = raw.split("\n");
-              let ev = null;
-              let dataLine = null;
-              for (const ln of parts) {
-                if (ln.startsWith("event:")) ev = ln.slice(6).trim();
-                if (ln.startsWith("data:")) dataLine = ln.slice(5).trim();
-              }
-              if (!ev) continue;
-
-              let data = {};
-              try { data = dataLine ? JSON.parse(dataLine) : {}; } catch {}
-
-              if (ev === "keepalive") continue;
-
-              if (ev === "status") {
-                const agent = data.agent ?? data.agent_name ?? null;
-                const status = data.status ?? data.phase ?? null;
-
-                if (agent && agent !== activeAgent) {
-                  activeAgent = agent;
-                  appendToPlaceholder(`\n\n[@${activeAgent}] `);
-                }
-                if (status) setUploadStatus(`🤖 ${status}`);
-              }
-
-              if (ev === "chunk") {
-                const delta = (data.delta ?? data.content ?? "");
-                if (delta) appendToPlaceholder(delta);
-                if (data.thread_id && !newThreadId) newThreadId = data.thread_id;
-              }
-
-              if (ev === "error") {
-                const code = data.code ?? null;
-                const errMsg = (data.error ?? data.message) || "Erro no servidor durante streaming";
-
-                if (code === "SERVER_BUSY") {
-                  sawServerBusy = true;
-                  try { await reader.cancel(); } catch {}
-                  break outerRead;
-                }
-                if (!isStale()) setV2vError(errMsg);
-              }
-
-              // Only close on GLOBAL done (no agent_id)
-              if (ev === "done" && data?.done === true && !data?.agent_id) {
-                try { await reader.cancel(); } catch {}
-                break outerRead;
-              }
-            }
-          }
-
-          if (sawServerBusy) {
-            busyRetry += 1;
-            if (busyRetry > MAX_BUSY_RETRIES) {
-              setV2vError("Servidor ocupado. Tente novamente em instantes.");
-              break;
-            }
-            const base = Math.min(20000, 1000 * (2 ** (busyRetry - 1)));
-            const jitter = Math.floor(Math.random() * 3000);
-            const delay = base + jitter;
-            if (!isStale()) setUploadStatus(`⏳ Servidor ocupado. Tentando novamente em ${Math.ceil(delay / 1000)}s...`);
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-          }
-
-          // SSE completed normally
-          break;
-        }
-
-        // Fallback non-stream
-        resp = await chat({
-          token,
-          org: tenant,
-          thread_id: threadId,
-          message: finalMsg,
-          agent_id: agentIdToSend,
-          trace_id: traceId,
-          client_message_id: clientMessageId,
-          signal: ctl.signal,
-        });
-        break;
+      if (resp?.status === 429) {
+        closeCapacityModal();
+        openCapacityModal(msg);
+        return;
       }
 
        // V2V-PATCH: se fallback /api/chat criou thread, capturar thread_id do resp
